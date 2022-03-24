@@ -27,13 +27,13 @@ pub fn start() {
     }
 
     // the start time
-    let start_time = Instant::new();
+    let start_time = Instant::now();
 
     // setup the chip8 interpretter
     let mut interp = Interpreter::load(path).unwrap();
 
     loop {
-        interp.update(start_time);
+        interp.update(&start_time);
     }
 
     // setup the window with sdl2
