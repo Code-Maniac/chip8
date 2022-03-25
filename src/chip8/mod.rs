@@ -11,6 +11,15 @@ use crate::chip8::interpreter::Interpreter;
 #[clap(author, version, about, long_about = None)]
 struct Args {
     romfile: String,
+
+    // the number of pixels that each "chip8" pixel is represented by on the
+    // window canvas
+    #[clap(short, long, default_value_t = 8)]
+    pixelsize: usize,
+
+    // the clock speed on the "cpu" in MHz
+    #[clap(short, long, default_value = "1.0")]
+    clockspeed: f32,
 }
 
 pub fn start() {
@@ -30,15 +39,9 @@ pub fn start() {
     let start_time = Instant::now();
 
     // setup the chip8 interpretter
-    let mut interp = Interpreter::load(path).unwrap();
+    let mut interp = Interpreter::load(path, args.pixelsize, args.clockspeed).unwrap();
 
     loop {
         interp.update(&start_time);
     }
-
-    // setup the window with sdl2
-
-    // run
-
-    // std::process::exit(0);
 }

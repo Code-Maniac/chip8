@@ -5,6 +5,7 @@ use rand::Rng;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::keyboard::Scancode;
+use sdl2::render::WindowCanvas;
 use sdl2::Sdl;
 use std::fs;
 use std::num::Wrapping;
@@ -27,6 +28,10 @@ const DISPLAY_HEIGHT_BYTES: usize = DISPLAY_HEIGHT / 8;
 
 const DISPLAY_SIZE: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT;
 const DISPLAY_SIZE_BYTES: usize = DISPLAY_SIZE / 8;
+
+// each pixel is represented by an 8x8 rectangle when drawn to the window
+// canvas
+const DISPLAY_PIXEL_SIZE: usize = 8;
 
 // 16 registers
 const REGISTERS_SIZE: usize = 0x10;
@@ -88,6 +93,13 @@ pub struct Interpreter {
     // the sdl context used for drawing and key polling
     sdl_context: Sdl,
 
+    // the window canvas that we draw to
+    canvas: WindowCanvas,
+
+    pixelsize: usize,
+
+    clockspeed: f32,
+
     // the memory
     memory: [u8; MEM_SIZE],
 
@@ -122,11 +134,32 @@ pub struct Interpreter {
 }
 
 impl Interpreter {
-    pub fn load(romfile: &Path) -> Result<Interpreter, &'static str> {
+    pub fn load(
+        romfile: &Path,
+        pixelsize: usize,
+        clockspeed: f32,
+    ) -> Result<Interpreter, &'static str> {
         let sdl_context = sdl2::init().unwrap();
+        let video_subsystem = sdl_context.video().unwrap();
+        let window = video_subsystem
+            .window(
+                "CHIP8",
+                (DISPLAY_WIDTH * pixelsize) as u32,
+                (DISPLAY_HEIGHT * pixelsize) as u32,
+            )
+            .position_centered()
+            .build()
+            .expect("Could not initialise video sybsystem");
+        let canvas = window
+            .into_canvas()
+            .build()
+            .expect("Could not make windowd canvas");
 
         let mut interp = Interpreter {
             sdl_context,
+            canvas,
+            pixelsize,
+            clockspeed,
             memory: [0; MEM_SIZE],
             registers: [Wrapping(0); REGISTERS_SIZE],
             sp: 0,
@@ -156,6 +189,8 @@ impl Interpreter {
 
     // function to do next cpu cycle
     pub fn update(&mut self, start_time: &Instant) {
+        self.check_exit();
+
         let elapsed = start_time.elapsed();
         let ticks = elapsed.as_millis() as u32;
 
@@ -163,15 +198,33 @@ impl Interpreter {
             self.process_opcode();
             self.update_counter += 1;
 
-            // as we are working in milliseconds and our update time is 16.6666667 we increment 16 once and increment 17 twice
+            // here we need to set the next update time based on the clock speed
+
             let inc = TICK_INCREMENTS[self.tick_increment_index];
             self.next_update_time += Wrapping(inc);
             self.tick_increment_index = self.tick_increment_index % TICK_INCREMENTS.len();
         }
 
         if ticks >= self.next_timer_dec_time.0 {
+            // as we are working in milliseconds and our update time is 16.6666667 we increment 16 once and increment 17 twice
             self.dec_delay_timer();
             self.dec_sound_timer();
+        }
+
+        self.canvas.clear();
+        self.canvas.present();
+    }
+
+    fn check_exit(&self) {
+        for event in self.sdl_context.event_pump().unwrap().poll_iter() {
+            match event {
+                Event::Quit { .. } => {
+                    std::process::exit(0);
+                }
+                _ => {
+                    println!("Another Event!");
+                }
+            }
         }
     }
 
@@ -388,7 +441,8 @@ impl Interpreter {
         // get the pixel value at coordinate x, y
         //let start_bit = (y as usize * DISPLAY_WIDTH) + (x % DISPLAY_WIDTH) as usize;
 
-        panic!("Not Implemented");
+        //panic!("Not Implemented");
+        0
     }
 
     // xor the pixel at the coordinate
@@ -581,7 +635,7 @@ impl Interpreter {
     // VF set to one if any screen pixels are unset due to xor or 0 if not
     // Op code: DXYN
     fn display_draw(&mut self, vxindex: usize, vyindex: usize, height: u8) {
-        panic!("Not Implemented");
+        //panic!("Not Implemented");
     }
 
     // Skip the next instruction if key at VX is pressed
