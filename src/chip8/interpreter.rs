@@ -5,6 +5,8 @@ use rand::Rng;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::keyboard::Scancode;
+use sdl2::pixels::Color;
+use sdl2::rect::Rect;
 use sdl2::render::WindowCanvas;
 use sdl2::Sdl;
 use std::fs;
@@ -12,14 +14,9 @@ use std::num::Wrapping;
 use std::path::Path;
 use std::time::Instant;
 
-// chip 8 has 0x1000 bytes of memory and therefore uses 12 bit addressing
-const ADDRESS_SIZE_BITS: usize = 12;
-
 // define constants for using the memory
 // Chip 8 has 4096 bytes
 const MEM_SIZE: usize = 0x1000;
-// 96 bytes for the stack
-const STACK_SIZE: usize = 0x60;
 // 256 bytes for the display
 const DISPLAY_WIDTH: usize = 64;
 const DISPLAY_WIDTH_BYTES: usize = DISPLAY_WIDTH / 8;
@@ -27,7 +24,7 @@ const DISPLAY_HEIGHT: usize = 32;
 const DISPLAY_HEIGHT_BYTES: usize = DISPLAY_HEIGHT / 8;
 
 const DISPLAY_SIZE: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT;
-const DISPLAY_SIZE_BYTES: usize = DISPLAY_SIZE / 8;
+const DISPLAY_SIZE_BYTES: usize = DISPLAY_WIDTH_BYTES * DISPLAY_HEIGHT_BYTES;
 
 // each pixel is represented by an 8x8 rectangle when drawn to the window
 // canvas
@@ -38,10 +35,9 @@ const REGISTERS_SIZE: usize = 0x10;
 const TICK_INCREMENTS: [u32; 3] = [16, 17, 17];
 
 const PROGRAM_START: usize = 0x200;
-const STACK_START: usize = 0xEA0;
 const DISPLAY_START: usize = 0xF00;
 
-const STACK_SLOTS: usize = (STACK_SIZE * 8) / ADDRESS_SIZE_BITS;
+const STACK_SLOTS: usize = 64;
 
 // fonts will be loaded into memory location 0
 const FONT_START: usize = 0x0;
@@ -89,6 +85,19 @@ const SCAN_CODES: &'static [Scancode; 0x10] = &[
     Scancode::V,
 ];
 
+const BLACK: Color = Color {
+    r: 0x00,
+    g: 0x00,
+    b: 0x00,
+    a: 0xFF,
+};
+const WHITE: Color = Color {
+    r: 0xFF,
+    g: 0xFF,
+    b: 0xFF,
+    a: 0xFF,
+};
+
 pub struct Interpreter {
     // the sdl context used for drawing and key polling
     sdl_context: Sdl,
@@ -106,6 +115,9 @@ pub struct Interpreter {
     // 16 variables variables
     registers: [Wrapping<u8>; REGISTERS_SIZE],
 
+    // stack for function entry/return
+    stack: Vec<usize>,
+
     // the stack pointer
     sp: usize,
 
@@ -120,13 +132,18 @@ pub struct Interpreter {
     delay_timer: u8,
     sound_timer: u8,
 
-    // program timer
+    // registers for the keys
+    keys: [u8; 0x10],
+
+    // Time of the next opcode
+    next_opcode_time: Wrapping<u32>,
+
+    // the update time controls when the render and the timer decrement happens
+    // this happens at a rate of 60hz
     next_update_time: Wrapping<u32>,
 
-    // timer decrement timer
-    next_timer_dec_time: Wrapping<u32>,
-
     // the index of the ticks to use for the next update
+    // as time is in ms we need to inc by 16 16 17... to achieve 16.67ms
     tick_increment_index: usize,
 
     // counter +1 for every time update is called
@@ -162,13 +179,15 @@ impl Interpreter {
             clockspeed,
             memory: [0; MEM_SIZE],
             registers: [Wrapping(0); REGISTERS_SIZE],
+            stack: Vec::new(),
             sp: 0,
             pc: PROGRAM_START,
             i: 0,
             delay_timer: 0,
             sound_timer: 0,
+            keys: [0x0; 0x10],
+            next_opcode_time: Wrapping(0u32),
             next_update_time: Wrapping(0u32),
-            next_timer_dec_time: Wrapping(0u32),
             tick_increment_index: 0,
             update_counter: 0,
         };
@@ -190,29 +209,50 @@ impl Interpreter {
     // function to do next cpu cycle
     pub fn update(&mut self, start_time: &Instant) {
         self.check_exit();
+        self.read_keys();
 
         let elapsed = start_time.elapsed();
         let ticks = elapsed.as_millis() as u32;
 
-        if ticks >= self.next_update_time.0 {
+        // NOTE: the way this updates is only for the timers.
+        // NOTE: change the opcode processing to work based on the clock speed
+        // NOTE: change the
+        if ticks >= self.next_opcode_time.0 {
             self.process_opcode();
             self.update_counter += 1;
 
-            // here we need to set the next update time based on the clock speed
+            self.next_opcode_time += Wrapping(16);
+        }
+
+        if ticks >= self.next_update_time.0 {
+            // as we are working in milliseconds and our update time is 16.6666667 we increment 16 once and increment 17 twice
+            self.dec_delay_timer();
+            self.dec_sound_timer();
+
+            for i in 0..DISPLAY_SIZE {
+                let x = i % DISPLAY_WIDTH;
+                let y = i / DISPLAY_WIDTH;
+                let pixel = self.get_display_pixel(x as u8, y as u8);
+
+                if pixel == 0x0 {
+                    self.canvas.set_draw_color(BLACK);
+                } else {
+                    self.canvas.set_draw_color(WHITE);
+                }
+                let rect = Rect::new(
+                    x as i32 * DISPLAY_PIXEL_SIZE as i32,
+                    y as i32 * DISPLAY_PIXEL_SIZE as i32,
+                    DISPLAY_PIXEL_SIZE as u32,
+                    DISPLAY_PIXEL_SIZE as u32,
+                );
+                self.canvas.fill_rect(rect).unwrap();
+            }
+            self.canvas.present();
 
             let inc = TICK_INCREMENTS[self.tick_increment_index];
             self.next_update_time += Wrapping(inc);
             self.tick_increment_index = self.tick_increment_index % TICK_INCREMENTS.len();
         }
-
-        if ticks >= self.next_timer_dec_time.0 {
-            // as we are working in milliseconds and our update time is 16.6666667 we increment 16 once and increment 17 twice
-            self.dec_delay_timer();
-            self.dec_sound_timer();
-        }
-
-        self.canvas.clear();
-        self.canvas.present();
     }
 
     fn check_exit(&self) {
@@ -224,6 +264,24 @@ impl Interpreter {
                 _ => {
                     println!("Another Event!");
                 }
+            }
+        }
+    }
+
+    fn read_keys(&mut self) {
+        for i in 0x0..0x10 {
+            let code = SCAN_CODES[i];
+
+            if self
+                .sdl_context
+                .event_pump()
+                .unwrap()
+                .keyboard_state()
+                .is_scancode_pressed(code)
+            {
+                self.keys[i] = 0x1;
+            } else {
+                self.keys[i] = 0x0;
             }
         }
     }
@@ -245,103 +303,149 @@ impl Interpreter {
         let nn = (opcode & 0xFF) as u8;
         let nnn = (opcode & 0xFFF) as usize;
 
-        println!("Opcode: {:#04X}", opcode);
-        println!("a: {:#X}", a);
-        println!("x: {:#X}", x);
-        println!("y: {:#X}", y);
-        println!("n: {:#X}", n);
+        // println!("Opcode: {:#04X}", opcode);
+        // println!("a: {:#X}", a);
+        // println!("x: {:#X}", x);
+        // println!("y: {:#X}", y);
+        // println!("n: {:#X}", n);
 
-        println!("nn: {:#02X}", nn);
-        println!("nnn: {:#03X}", nnn);
+        // println!("nn: {:#02X}", nn);
+        // println!("nnn: {:#03X}", nnn);
 
-        println!("pc: {}\tsp: {}", self.pc, self.sp);
-        println!("Loops: {}\n", self.update_counter);
+        // println!("pc: {}\tsp: {}", self.pc, self.sp);
+        // println!("Loops: {}\n", self.update_counter);
 
-        if opcode == 0x00E0 {
-            self.disp_clear();
-        } else if opcode == 0x00EE {
-            self.flow_return();
-        } else if a == 0 {
-            self.call_machine_code_routine(nnn);
-        } else if a == 0x1 {
-            self.flow_goto(nnn);
-        } else if a == 0x2 {
-            self.flow_call_subroutine(nnn);
-        } else if a == 0x3 {
-            self.cond_if_vx_nn_eq_skip(x, nn);
-        } else if a == 0x4 {
-            self.cond_if_vx_nn_neq_skip(x, nn);
-        } else if a == 0x5 {
-            self.cond_if_vx_vy_eq_skip(x, y);
-        } else if a == 0x6 {
-            self.const_set_vx_nn(x, nn);
-        } else if a == 0x7 {
-            self.const_set_add_vx_nn(x, nn);
-        } else if a == 0x8 {
-            if n == 0x0 {
-                self.assig_vx_to_vy(x, y);
-            } else if n == 0x1 {
-                self.bitop_vx_oreq_vy(x, y);
-            } else if n == 0x2 {
-                self.bitop_vx_andeq_vy(x, y);
-            } else if n == 0x3 {
-                self.bitop_vx_xoreq_vy(x, y);
-            } else if n == 0x4 {
-                self.math_vx_pleq_vy(x, y);
-            } else if n == 0x5 {
-                self.math_vx_mieq_vy(x, y);
-            } else if n == 0x6 {
-                self.bitop_vx_rsh(x);
-            } else if n == 0x7 {
-                self.math_vx_eq_vy_mi_vx(x, y);
-            } else if n == 0xE {
-                self.bitop_vx_lsh(x);
-            } else {
-                panic!();
+        match a {
+            0x0 => match nnn {
+                0x0E0 => {
+                    self.disp_clear();
+                }
+                0x0EE => {
+                    self.flow_return();
+                }
+                _ => {
+                    self.call_machine_code_routine(nnn);
+                }
+            },
+            0x1 => {
+                self.flow_goto(nnn);
             }
-        } else if a == 0x9 {
-            self.cond_if_vx_vy_neq_skip(x, y);
-        } else if a == 0xA {
-            self.mem_set_i(nnn);
-        } else if a == 0xB {
-            self.flow_jump_v0_pl(nnn);
-        } else if a == 0xC {
-            self.rand_vx_rand_and_nn(x, nn);
-        } else if a == 0xD {
-            self.display_draw(x, y, n);
-        } else if a == 0xE {
-            if nn == 0x9E {
-                self.keyop_if_vx_pressed_skip(x);
-            } else if nn == 0xA1 {
-                self.keyop_if_vx_not_pressed_skip(x);
-            } else {
-                panic!();
+            0x2 => {
+                self.flow_call_subroutine(nnn);
             }
-        } else if a == 0xF {
-            if nn == 0x07 {
-                self.timer_set_vx_delay(x);
-            } else if nn == 0x0A {
-                self.keyop_vx_set_key(x);
-            } else if nn == 0x15 {
-                self.timer_set_delay_vx(x);
-            } else if nn == 0x18 {
-                self.sound_set_timer_vx(x);
-            } else if nn == 0x1E {
-                self.mem_i_pleq_vx(x);
-            } else if nn == 0x29 {
-                self.mem_set_i_sprite_addr_vx(x);
-            } else if nn == 0x33 {
-                self.bcd_set_i_vx(x);
-            } else if nn == 0x55 {
-                self.mem_reg_dump(x);
-            } else if nn == 0x65 {
-                self.mem_reg_load(x);
-            } else {
-                panic!();
+            0x3 => {
+                self.cond_if_vx_nn_eq_skip(x, nn);
             }
-        } else {
-            panic!();
+            0x4 => {
+                self.cond_if_vx_nn_neq_skip(x, nn);
+            }
+            0x5 => {
+                self.cond_if_vx_vy_eq_skip(x, y);
+            }
+            0x6 => {
+                self.const_set_vx_nn(x, nn);
+            }
+            0x7 => {
+                self.const_set_add_vx_nn(x, nn);
+            }
+            0x8 => match n {
+                0x0 => {
+                    self.assig_vx_to_vy(x, y);
+                }
+                0x1 => {
+                    self.bitop_vx_oreq_vy(x, y);
+                }
+                0x2 => {
+                    self.bitop_vx_andeq_vy(x, y);
+                }
+                0x3 => {
+                    self.bitop_vx_xoreq_vy(x, y);
+                }
+                0x4 => {
+                    self.math_vx_pleq_vy(x, y);
+                }
+                0x5 => {
+                    self.math_vx_mieq_vy(x, y);
+                }
+                0x6 => {
+                    self.bitop_vx_rsh(x);
+                }
+                0x7 => {
+                    self.math_vx_eq_vy_mi_vx(x, y);
+                }
+                0xE => {
+                    self.bitop_vx_lsh(x);
+                }
+                _ => {
+                    self.invalid_opcode_panic();
+                }
+            },
+            0x9 => {
+                self.cond_if_vx_vy_neq_skip(x, y);
+            }
+            0xA => {
+                self.mem_set_i(nnn);
+            }
+            0xB => {
+                self.flow_jump_v0_pl(nnn);
+            }
+            0xC => {
+                self.rand_vx_rand_and_nn(x, nn);
+            }
+            0xD => {
+                self.display_draw(x, y, n);
+            }
+            0xE => match nn {
+                0x9E => {
+                    self.keyop_if_vx_pressed_skip(x);
+                }
+                0xA1 => {
+                    self.keyop_if_vx_not_pressed_skip(x);
+                }
+                _ => {
+                    self.invalid_opcode_panic();
+                }
+            },
+            0xF => match nn {
+                0x07 => {
+                    self.timer_set_vx_delay(x);
+                }
+                0x0A => {
+                    self.keyop_vx_set_key(x);
+                }
+                0x15 => {
+                    self.timer_set_delay_vx(x);
+                }
+                0x18 => {
+                    self.sound_set_timer_vx(x);
+                }
+                0x1E => {
+                    self.mem_i_pleq_vx(x);
+                }
+                0x29 => {
+                    self.mem_set_i_sprite_addr_vx(x);
+                }
+                0x33 => {
+                    self.bcd_set_i_vx(x);
+                }
+                0x55 => {
+                    self.mem_reg_dump(x);
+                }
+                0x65 => {
+                    self.mem_reg_load(x);
+                }
+                _ => {
+                    self.invalid_opcode_panic();
+                }
+            },
+            _ => {
+                self.invalid_opcode_panic();
+            }
         }
+    }
+
+    fn invalid_opcode_panic(&self) {
+        panic!("Invalid opcode")
     }
 
     // decrement the delay timer if delay timer is not 0
@@ -382,27 +486,12 @@ impl Interpreter {
     // stack pointer
     // if no more space on the stack then panic!()
     fn push_stack(&mut self, addr: usize) {
-        self.sp += 1;
-        if self.sp == STACK_SLOTS {
+        if self.sp == STACK_SLOTS - 1 {
             panic!("Stack overflow");
         }
 
-        // calculate the position in bits
-        let bit_position = self.sp * ADDRESS_SIZE_BITS;
-
-        let bytes_position = bit_position / 8;
-        let bits = bit_position % 8;
-
-        let stack_pos = STACK_START + bytes_position;
-        if bits == 0 {
-            // we are aligned with a byte
-            self.memory[stack_pos] = addr as u8;
-            self.memory[stack_pos + 1] = ((addr >> 8) & 0xF) as u8;
-        } else {
-            // we are 4 bits out of phase with a byte
-            self.memory[stack_pos] &= ((addr << 4) & 0xF0) as u8;
-            self.memory[stack_pos] = (addr >> 8) as u8;
-        }
+        self.stack.push(addr);
+        self.sp += 1;
     }
 
     // pop the 12 bit memory address from the stack and decrement the stack
@@ -413,45 +502,34 @@ impl Interpreter {
             panic!("Stack underflow");
         }
 
-        // calculate the position in bits
-        let bit_position = self.sp * ADDRESS_SIZE_BITS;
-
-        // decrement the stack pointer
+        let addr = self.stack.pop().unwrap();
         self.sp -= 1;
+        addr
+    }
 
-        let bytes_position = bit_position / 8;
-        let bits = bit_position % 8;
-
-        let stack_pos = STACK_START + bytes_position;
-        if bits == 0 {
-            // we are aligned with a byte
-            let addr1 = self.memory[stack_pos] as usize;
-            let addr2 = ((self.memory[stack_pos + 1] as usize) & 0xF) << 8;
-            addr1 | addr2
-        } else {
-            // we are 4 bits out of phase with a byte
-            let addr1 = (self.memory[stack_pos] >> 4) as usize;
-            let addr2 = (self.memory[stack_pos + 1] as usize) << 8;
-            addr1 | addr2
-        }
+    fn get_display_pixel_byte_addr(&self, x: u8, y: u8) -> usize {
+        DISPLAY_START + (x as usize / 8) + (y as usize * DISPLAY_WIDTH_BYTES)
     }
 
     // get the value of the pixel at the coordinate (0 or 1)
     fn get_display_pixel(&self, x: u8, y: u8) -> u8 {
-        // get the pixel value at coordinate x, y
-        //let start_bit = (y as usize * DISPLAY_WIDTH) + (x % DISPLAY_WIDTH) as usize;
-
-        //panic!("Not Implemented");
-        0
+        let pixel_byte_addr = self.get_display_pixel_byte_addr(x, y);
+        let pixel_byte = self.memory[pixel_byte_addr];
+        (pixel_byte >> (x % 8)) & 0x1
     }
 
     // xor the pixel at the coordinate
     // return true if pixel was set from 1 to 0 (collision)
-    fn xor_display_pixel(&mut self, x: u8, y: u8, val: u8) -> bool {
-        let current_bit_val = self.get_display_pixel(x, y);
+    fn xor_display_pixel(&mut self, x: u8, y: u8, mut val: u8) -> bool {
+        val &= 0x1;
 
-        // collision happen
-        return (val == 1) && current_bit_val != val;
+        let pixel_byte_addr = self.get_display_pixel_byte_addr(x, y);
+        let pixel_bit_cur = self.get_display_pixel(x, y);
+
+        self.memory[pixel_byte_addr] ^= val << (x % 8);
+
+        // collision happened
+        return (val == 1) && pixel_bit_cur != val;
     }
 
     // xor the row of pixels starting at coordinate x,y with pixels defined in
@@ -459,8 +537,12 @@ impl Interpreter {
     // return true if any pixel in the row was set from 1 to 0 (collision)
     fn xor_display_row(&mut self, x: u8, y: u8, row_val: u8) -> bool {
         let mut output = false;
-        for i in x..x + 8 {
-            if self.xor_display_pixel(i, y, row_val >> i) {
+        for i in 0..8 {
+            // if wrap to other side of screen happens then break
+            let xpixel = Wrapping(x) + Wrapping(i);
+            if xpixel.0 == DISPLAY_WIDTH as u8 {
+                break;
+            } else if self.xor_display_pixel(x + i, y, row_val >> (7 - i)) {
                 output = true;
             }
         }
@@ -487,6 +569,7 @@ impl Interpreter {
     // Op code: 00EE
     fn flow_return(&mut self) {
         if self.sp > 0 {
+            let pc_cur = self.pc;
             self.pc = self.pop_stack();
         }
     }
@@ -500,13 +583,8 @@ impl Interpreter {
     // Call subroutine at NNN
     // Op code: 2NNN
     fn flow_call_subroutine(&mut self, addr: usize) {
-        self.sp = self.sp + 1;
-        if self.sp as usize == STACK_SIZE {
-            panic!("Stack overflow");
-        } else {
-            self.pc = addr;
-            self.push_stack(self.pc);
-        }
+        self.push_stack(self.pc);
+        self.pc = addr;
     }
 
     // Skip the next instruction if VX eq NN
@@ -524,7 +602,7 @@ impl Interpreter {
     // Skip the next instruction if VX eq VY
     // Op code: 5XY0
     fn cond_if_vx_vy_eq_skip(&mut self, vxindex: usize, vyindex: usize) {
-        self.cond_inc_pc(self.registers[vxindex].0 != self.registers[vyindex].0);
+        self.cond_inc_pc(self.registers[vxindex].0 == self.registers[vyindex].0);
     }
 
     // Set VX to NN
@@ -635,22 +713,26 @@ impl Interpreter {
     // VF set to one if any screen pixels are unset due to xor or 0 if not
     // Op code: DXYN
     fn display_draw(&mut self, vxindex: usize, vyindex: usize, height: u8) {
-        //panic!("Not Implemented");
+        let vx = self.registers[vxindex].0;
+        let vy = self.registers[vyindex].0;
+        println!("X: {} Y: {} Height; {}", vx, vy, height);
+        for i in 0..height as usize {
+            let row_index = vy as usize + i;
+            if row_index < DISPLAY_HEIGHT {
+                self.xor_display_row(vx, row_index as u8, self.memory[self.i + i]);
+            } else {
+                break;
+            }
+        }
     }
 
     // Skip the next instruction if key at VX is pressed
     // Op code: EX9E
     fn keyop_if_vx_pressed_skip(&mut self, vxindex: usize) {
         let vx = self.registers[vxindex];
-        let code = SCAN_CODES[vx.0 as usize];
+        let key_pressed = self.keys[vx.0 as usize];
 
-        if self
-            .sdl_context
-            .event_pump()
-            .unwrap()
-            .keyboard_state()
-            .is_scancode_pressed(code)
-        {
+        if key_pressed == 0x1 {
             self.inc_pc();
         }
     }
@@ -849,7 +931,7 @@ impl Interpreter {
     fn bcd_set_i_vx(&mut self, vxindex: usize) {
         let mut vx = self.registers[vxindex].0;
 
-        for i in (0..2).rev() {
+        for i in (0..3).rev() {
             self.memory[self.i + i] = vx % 10;
             vx /= 10;
         }
@@ -858,7 +940,7 @@ impl Interpreter {
     // Store from V0 to VX to memory starting at I. I remains unchanged
     // Op code: FX55
     fn mem_reg_dump(&mut self, vxindex: usize) {
-        for i in 0..vxindex {
+        for i in 0..vxindex + 1 {
             self.memory[self.i + i] = self.registers[i].0;
         }
     }
@@ -866,7 +948,7 @@ impl Interpreter {
     // Load from I to V0 through VX. I remains unchaged
     // Op code: FX65
     fn mem_reg_load(&mut self, vxindex: usize) {
-        for i in 0..vxindex {
+        for i in 0..vxindex + 1 {
             self.registers[i] = Wrapping(self.memory[self.i + i]);
         }
     }
