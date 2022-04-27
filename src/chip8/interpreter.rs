@@ -5,37 +5,25 @@ use rand::Rng;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::keyboard::Scancode;
-use sdl2::pixels::Color;
-use sdl2::rect::Rect;
-use sdl2::render::WindowCanvas;
 use sdl2::Sdl;
 use std::fs;
 use std::num::Wrapping;
 use std::path::Path;
 use std::time::Instant;
 
+use super::audio::AudioDevice;
+use super::video::VideoDevice;
+// use super::keyboard::KeyboardDevice
+
 // define constants for using the memory
 // Chip 8 has 4096 bytes
 const MEM_SIZE: usize = 0x1000;
-// 256 bytes for the display
-const DISPLAY_WIDTH: usize = 64;
-const DISPLAY_WIDTH_BYTES: usize = DISPLAY_WIDTH / 8;
-const DISPLAY_HEIGHT: usize = 32;
-const DISPLAY_HEIGHT_BYTES: usize = DISPLAY_HEIGHT / 8;
-
-const DISPLAY_SIZE: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT;
-const DISPLAY_SIZE_BYTES: usize = DISPLAY_WIDTH_BYTES * DISPLAY_HEIGHT_BYTES;
-
-// each pixel is represented by an 8x8 rectangle when drawn to the window
-// canvas
-const DISPLAY_PIXEL_SIZE: usize = 8;
 
 // 16 registers
 const REGISTERS_SIZE: usize = 0x10;
 const TICK_INCREMENTS: [u32; 3] = [16, 17, 17];
 
 const PROGRAM_START: usize = 0x200;
-const DISPLAY_START: usize = 0xF00;
 
 const STACK_SLOTS: usize = 64;
 
@@ -85,28 +73,18 @@ const SCAN_CODES: &'static [Scancode; 0x10] = &[
     Scancode::V,
 ];
 
-const BLACK: Color = Color {
-    r: 0x00,
-    g: 0x00,
-    b: 0x00,
-    a: 0xFF,
-};
-const WHITE: Color = Color {
-    r: 0xFF,
-    g: 0xFF,
-    b: 0xFF,
-    a: 0xFF,
-};
-
 pub struct Interpreter {
-    // the sdl context used for drawing and key polling
+    // the sdl context
     sdl_context: Sdl,
 
-    // the window canvas that we draw to
-    canvas: WindowCanvas,
+    // the video device used for drawing to screen
+    video_device: VideoDevice,
 
-    pixelsize: usize,
+    // the audio device used for the beeps
+    audio_device: AudioDevice,
 
+    //     // the keyboard device used for checking key pressed
+    //     keyboard_device: KeyboardDevice,
     clockspeed: f32,
 
     // the memory
@@ -133,7 +111,7 @@ pub struct Interpreter {
     sound_timer: u8,
 
     // registers for the keys
-    keys: [u8; 0x10],
+    keys: [bool; 0x10],
 
     // Time of the next opcode
     next_opcode_time: Wrapping<u32>,
@@ -157,25 +135,14 @@ impl Interpreter {
         clockspeed: f32,
     ) -> Result<Interpreter, &'static str> {
         let sdl_context = sdl2::init().unwrap();
-        let video_subsystem = sdl_context.video().unwrap();
-        let window = video_subsystem
-            .window(
-                "CHIP8",
-                (DISPLAY_WIDTH * pixelsize) as u32,
-                (DISPLAY_HEIGHT * pixelsize) as u32,
-            )
-            .position_centered()
-            .build()
-            .expect("Could not initialise video sybsystem");
-        let canvas = window
-            .into_canvas()
-            .build()
-            .expect("Could not make windowd canvas");
+        let video_device = VideoDevice::new(&sdl_context, pixelsize);
+        let audio_device = AudioDevice::new(&sdl_context);
 
         let mut interp = Interpreter {
             sdl_context,
-            canvas,
-            pixelsize,
+            video_device,
+            audio_device,
+            // keyboard_device: KeyboardDevice::new(sdl_context),
             clockspeed,
             memory: [0; MEM_SIZE],
             registers: [Wrapping(0); REGISTERS_SIZE],
@@ -185,7 +152,7 @@ impl Interpreter {
             i: 0,
             delay_timer: 0,
             sound_timer: 0,
-            keys: [0x0; 0x10],
+            keys: [false; 0x10],
             next_opcode_time: Wrapping(0u32),
             next_update_time: Wrapping(0u32),
             tick_increment_index: 0,
@@ -210,6 +177,7 @@ impl Interpreter {
     pub fn update(&mut self, start_time: &Instant) {
         self.check_exit();
         self.read_keys();
+        self.set_beep();
 
         let elapsed = start_time.elapsed();
         let ticks = elapsed.as_millis() as u32;
@@ -229,25 +197,11 @@ impl Interpreter {
             self.dec_delay_timer();
             self.dec_sound_timer();
 
-            for i in 0..DISPLAY_SIZE {
-                let x = i % DISPLAY_WIDTH;
-                let y = i / DISPLAY_WIDTH;
-                let pixel = self.get_display_pixel(x as u8, y as u8);
+            // draw to screen
+            self.video_device.render();
 
-                if pixel == 0x0 {
-                    self.canvas.set_draw_color(BLACK);
-                } else {
-                    self.canvas.set_draw_color(WHITE);
-                }
-                let rect = Rect::new(
-                    x as i32 * DISPLAY_PIXEL_SIZE as i32,
-                    y as i32 * DISPLAY_PIXEL_SIZE as i32,
-                    DISPLAY_PIXEL_SIZE as u32,
-                    DISPLAY_PIXEL_SIZE as u32,
-                );
-                self.canvas.fill_rect(rect).unwrap();
-            }
-            self.canvas.present();
+            // set the beep
+            self.audio_device.set_beep(self.sound_timer > 0);
 
             let inc = TICK_INCREMENTS[self.tick_increment_index];
             self.next_update_time += Wrapping(inc);
@@ -262,7 +216,7 @@ impl Interpreter {
                     std::process::exit(0);
                 }
                 _ => {
-                    println!("Another Event!");
+                    //println!("Another Event!");
                 }
             }
         }
@@ -279,10 +233,22 @@ impl Interpreter {
                 .keyboard_state()
                 .is_scancode_pressed(code)
             {
-                self.keys[i] = 0x1;
-            } else {
-                self.keys[i] = 0x0;
+                self.keys[i] = true;
             }
+        }
+    }
+
+    fn clear_keys(&mut self) {
+        for i in 0x0..0x10 {
+            self.keys[i] = false;
+        }
+    }
+
+    fn set_beep(&self) {
+        if self.sound_timer > 0 {
+            // turn on beep
+        } else {
+            // turn off beep
         }
     }
 
@@ -507,26 +473,11 @@ impl Interpreter {
         addr
     }
 
-    fn get_display_pixel_byte_addr(&self, x: u8, y: u8) -> usize {
-        DISPLAY_START + (x as usize / 8) + (y as usize * DISPLAY_WIDTH_BYTES)
-    }
-
-    // get the value of the pixel at the coordinate (0 or 1)
-    fn get_display_pixel(&self, x: u8, y: u8) -> u8 {
-        let pixel_byte_addr = self.get_display_pixel_byte_addr(x, y);
-        let pixel_byte = self.memory[pixel_byte_addr];
-        (pixel_byte >> (x % 8)) & 0x1
-    }
-
     // xor the pixel at the coordinate
     // return true if pixel was set from 1 to 0 (collision)
-    fn xor_display_pixel(&mut self, x: u8, y: u8, mut val: u8) -> bool {
-        val &= 0x1;
-
-        let pixel_byte_addr = self.get_display_pixel_byte_addr(x, y);
-        let pixel_bit_cur = self.get_display_pixel(x, y);
-
-        self.memory[pixel_byte_addr] ^= val << (x % 8);
+    fn xor_display_pixel(&mut self, x: u8, y: u8, val: u8) -> bool {
+        let pixel_bit_cur = self.video_device.get_pixel(x, y);
+        self.video_device.set_pixel(x, y, val);
 
         // collision happened
         return (val == 1) && pixel_bit_cur != val;
@@ -538,11 +489,11 @@ impl Interpreter {
     fn xor_display_row(&mut self, x: u8, y: u8, row_val: u8) -> bool {
         let mut output = false;
         for i in 0..8 {
-            // if wrap to other side of screen happens then break
-            let xpixel = Wrapping(x) + Wrapping(i);
-            if xpixel.0 == DISPLAY_WIDTH as u8 {
+            // if wrap to other side of screen happens then skip
+            let xpixel = (x + i) as usize;
+            if xpixel == self.video_device.get_width() {
                 break;
-            } else if self.xor_display_pixel(x + i, y, row_val >> (7 - i)) {
+            } else if self.xor_display_pixel(xpixel as u8, y, row_val >> (7 - i)) {
                 output = true;
             }
         }
@@ -552,24 +503,20 @@ impl Interpreter {
     // functions to process opcodes
     // Call machine code routine at addres NNN
     // Op code: 0NNN
-    fn call_machine_code_routine(&mut self, addr: usize) {
+    fn call_machine_code_routine(&mut self, _addr: usize) {
         panic!("Not Implemented");
     }
 
     // Clear the screen
     // Op code: 00E0
     fn disp_clear(&mut self) {
-        // set all pixels to 0
-        for i in DISPLAY_START..DISPLAY_START + DISPLAY_SIZE_BYTES {
-            self.memory[i] = 0;
-        }
+        self.video_device.clear();
     }
 
     // return from a subroutine
     // Op code: 00EE
     fn flow_return(&mut self) {
         if self.sp > 0 {
-            let pc_cur = self.pc;
             self.pc = self.pop_stack();
         }
     }
@@ -715,10 +662,9 @@ impl Interpreter {
     fn display_draw(&mut self, vxindex: usize, vyindex: usize, height: u8) {
         let vx = self.registers[vxindex].0;
         let vy = self.registers[vyindex].0;
-        println!("X: {} Y: {} Height; {}", vx, vy, height);
         for i in 0..height as usize {
             let row_index = vy as usize + i;
-            if row_index < DISPLAY_HEIGHT {
+            if row_index < self.video_device.get_height() {
                 self.xor_display_row(vx, row_index as u8, self.memory[self.i + i]);
             } else {
                 break;
@@ -732,26 +678,24 @@ impl Interpreter {
         let vx = self.registers[vxindex];
         let key_pressed = self.keys[vx.0 as usize];
 
-        if key_pressed == 0x1 {
+        if key_pressed {
             self.inc_pc();
         }
+
+        self.clear_keys();
     }
 
     // Skip the next is instruction if key at VX is not pressed
     // Op code: EXA1
     fn keyop_if_vx_not_pressed_skip(&mut self, vxindex: usize) {
         let vx = self.registers[vxindex];
-        let code = SCAN_CODES[vx.0 as usize];
+        let key_pressed = self.keys[vx.0 as usize];
 
-        if !self
-            .sdl_context
-            .event_pump()
-            .unwrap()
-            .keyboard_state()
-            .is_scancode_pressed(code)
-        {
+        if !key_pressed {
             self.inc_pc();
         }
+
+        self.clear_keys();
     }
 
     // Set VX to the value of the delay timer

@@ -1,10 +1,14 @@
+mod audio;
+mod colors;
 mod interpreter;
+mod keyboard;
+mod video;
 
 use clap::Parser;
 use std::path::Path;
 use std::time::Instant;
 
-use crate::chip8::interpreter::Interpreter;
+use interpreter::Interpreter;
 
 /// Chip8 Interpreter
 #[derive(Parser, Debug)]
