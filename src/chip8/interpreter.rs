@@ -1,10 +1,5 @@
-extern crate rand;
-extern crate sdl2;
-
 use rand::Rng;
 use sdl2::event::Event;
-use sdl2::keyboard::Keycode;
-use sdl2::keyboard::Scancode;
 use sdl2::Sdl;
 use std::fs;
 use std::num::Wrapping;
@@ -12,8 +7,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use super::audio::AudioDevice;
+use super::keyboard::KeyboardDevice;
 use super::video::VideoDevice;
-// use super::keyboard::KeyboardDevice
 
 // define constants for using the memory
 // Chip 8 has 4096 bytes
@@ -53,35 +48,18 @@ const FONT_DATA: &'static [u8; FONT_CHAR_SIZE * FONT_CHAR_COUNT] = &[
     0xF0, 0x80, 0xF0, 0x80, 0x80, // "F"
 ];
 
-// each scancode needs to be at a specific index
-const SCAN_CODES: &'static [Scancode; 0x10] = &[
-    Scancode::X,
-    Scancode::Num1,
-    Scancode::Num2,
-    Scancode::Num3,
-    Scancode::Q,
-    Scancode::W,
-    Scancode::E,
-    Scancode::A,
-    Scancode::S,
-    Scancode::D,
-    Scancode::Z,
-    Scancode::C,
-    Scancode::Num4,
-    Scancode::R,
-    Scancode::F,
-    Scancode::V,
-];
-
-pub struct Interpreter {
+pub struct Interpreter<'a> {
     // the sdl context
-    sdl_context: Sdl,
+    sdl_context: &'a Sdl,
 
     // the video device used for drawing to screen
     video_device: VideoDevice,
 
     // the audio device used for the beeps
     audio_device: AudioDevice,
+
+    // the keyboard device used to handle key input
+    keyboard_device: KeyboardDevice<'a>,
 
     //     // the keyboard device used for checking key pressed
     //     keyboard_device: KeyboardDevice,
@@ -110,9 +88,6 @@ pub struct Interpreter {
     delay_timer: u8,
     sound_timer: u8,
 
-    // registers for the keys
-    keys: [bool; 0x10],
-
     // Time of the next opcode
     next_opcode_time: Wrapping<u32>,
 
@@ -128,21 +103,23 @@ pub struct Interpreter {
     update_counter: usize,
 }
 
-impl Interpreter {
+impl<'a> Interpreter<'a> {
     pub fn load(
+        sdl_context: &'a Sdl,
         romfile: &Path,
         pixelsize: usize,
         clockspeed: f32,
-    ) -> Result<Interpreter, &'static str> {
-        let sdl_context = sdl2::init().unwrap();
+        start_time: &Instant,
+    ) -> Result<Interpreter<'a>, &'static str> {
         let video_device = VideoDevice::new(&sdl_context, pixelsize);
         let audio_device = AudioDevice::new(&sdl_context);
+        let keyboard_device = KeyboardDevice::new(&sdl_context);
 
         let mut interp = Interpreter {
             sdl_context,
             video_device,
             audio_device,
-            // keyboard_device: KeyboardDevice::new(sdl_context),
+            keyboard_device,
             clockspeed,
             memory: [0; MEM_SIZE],
             registers: [Wrapping(0); REGISTERS_SIZE],
@@ -152,9 +129,8 @@ impl Interpreter {
             i: 0,
             delay_timer: 0,
             sound_timer: 0,
-            keys: [false; 0x10],
-            next_opcode_time: Wrapping(0u32),
-            next_update_time: Wrapping(0u32),
+            next_opcode_time: Wrapping(start_time.elapsed().as_millis() as u32),
+            next_update_time: Wrapping(start_time.elapsed().as_millis() as u32),
             tick_increment_index: 0,
             update_counter: 0,
         };
@@ -176,8 +152,7 @@ impl Interpreter {
     // function to do next cpu cycle
     pub fn update(&mut self, start_time: &Instant) {
         self.check_exit();
-        self.read_keys();
-        self.set_beep();
+        self.keyboard_device.read_keys();
 
         let elapsed = start_time.elapsed();
         let ticks = elapsed.as_millis() as u32;
@@ -189,7 +164,7 @@ impl Interpreter {
             self.process_opcode();
             self.update_counter += 1;
 
-            self.next_opcode_time += Wrapping(16);
+            self.next_opcode_time += Wrapping(8);
         }
 
         if ticks >= self.next_update_time.0 {
@@ -222,36 +197,6 @@ impl Interpreter {
         }
     }
 
-    fn read_keys(&mut self) {
-        for i in 0x0..0x10 {
-            let code = SCAN_CODES[i];
-
-            if self
-                .sdl_context
-                .event_pump()
-                .unwrap()
-                .keyboard_state()
-                .is_scancode_pressed(code)
-            {
-                self.keys[i] = true;
-            }
-        }
-    }
-
-    fn clear_keys(&mut self) {
-        for i in 0x0..0x10 {
-            self.keys[i] = false;
-        }
-    }
-
-    fn set_beep(&self) {
-        if self.sound_timer > 0 {
-            // turn on beep
-        } else {
-            // turn off beep
-        }
-    }
-
     fn process_opcode(&mut self) {
         // we do some weird shit to deal with endian-ness
         let op1 = self.memory[self.pc as usize] as u16;
@@ -268,18 +213,6 @@ impl Interpreter {
 
         let nn = (opcode & 0xFF) as u8;
         let nnn = (opcode & 0xFFF) as usize;
-
-        // println!("Opcode: {:#04X}", opcode);
-        // println!("a: {:#X}", a);
-        // println!("x: {:#X}", x);
-        // println!("y: {:#X}", y);
-        // println!("n: {:#X}", n);
-
-        // println!("nn: {:#02X}", nn);
-        // println!("nnn: {:#03X}", nnn);
-
-        // println!("pc: {}\tsp: {}", self.pc, self.sp);
-        // println!("Loops: {}\n", self.update_counter);
 
         match a {
             0x0 => match nnn {
@@ -676,26 +609,26 @@ impl Interpreter {
     // Op code: EX9E
     fn keyop_if_vx_pressed_skip(&mut self, vxindex: usize) {
         let vx = self.registers[vxindex];
-        let key_pressed = self.keys[vx.0 as usize];
+        let key_pressed = self.keyboard_device.is_key_pressed(vx.0);
 
         if key_pressed {
             self.inc_pc();
         }
 
-        self.clear_keys();
+        self.keyboard_device.clear_keys();
     }
 
     // Skip the next is instruction if key at VX is not pressed
     // Op code: EXA1
     fn keyop_if_vx_not_pressed_skip(&mut self, vxindex: usize) {
         let vx = self.registers[vxindex];
-        let key_pressed = self.keys[vx.0 as usize];
+        let key_pressed = self.keyboard_device.is_key_pressed(vx.0);
 
         if !key_pressed {
             self.inc_pc();
         }
 
-        self.clear_keys();
+        self.keyboard_device.clear_keys();
     }
 
     // Set VX to the value of the delay timer
@@ -707,139 +640,7 @@ impl Interpreter {
     // Set VX to next key press - blocking operation until key is pressed
     // Op code: FX0A
     fn keyop_vx_set_key(&mut self, vxindex: usize) {
-        let mut key: u8 = 0xFF;
-
-        // now keep polling events until a key down happens on:
-        // REAL -> CHIP8
-        // 1234 -> 123B
-        // qwer -> 456C
-        // asdf -> 789D
-        // zxcv -> A0BF
-        while key == 0xFF {
-            for event in self.sdl_context.event_pump().unwrap().poll_iter() {
-                match event {
-                    // row one
-                    Event::KeyDown {
-                        keycode: Some(Keycode::Num1),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0x1;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::Num2),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0x2;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::Num3),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0x3;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::Num4),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0xC;
-                    }
-                    // row two
-                    Event::KeyDown {
-                        keycode: Some(Keycode::Q),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0x4;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::W),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0x5;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::E),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0x6;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::R),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0xD;
-                    }
-                    // row three
-                    Event::KeyDown {
-                        keycode: Some(Keycode::A),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0x7;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::S),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0x8;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::D),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0x9;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::F),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0xE;
-                    }
-                    // row four
-                    Event::KeyDown {
-                        keycode: Some(Keycode::Z),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0xA;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::X),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0x0;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::C),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0xB;
-                    }
-                    Event::KeyDown {
-                        keycode: Some(Keycode::V),
-                        repeat: false,
-                        ..
-                    } => {
-                        key = 0xF;
-                    }
-                    _ => (), // ignore other events
-                }
-            }
-        }
-
-        self.registers[vxindex] = Wrapping(key);
+        self.registers[vxindex] = Wrapping(self.keyboard_device.get_key_event());
     }
 
     // Set the delay timer to VX

@@ -1,3 +1,6 @@
+extern crate rand;
+extern crate sdl2;
+
 mod audio;
 mod colors;
 mod interpreter;
@@ -43,7 +46,15 @@ pub fn start() {
     let start_time = Instant::now();
 
     // setup the chip8 interpretter
-    let mut interp = Interpreter::load(path, args.pixelsize, args.clockspeed).unwrap();
+    let sdl_context = sdl2::init().unwrap();
+    let mut interp = Interpreter::load(
+        &sdl_context,
+        path,
+        args.pixelsize,
+        args.clockspeed,
+        &start_time,
+    )
+    .unwrap();
 
     loop {
         interp.update(&start_time);
