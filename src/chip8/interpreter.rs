@@ -373,8 +373,24 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn do_carry(&mut self, new_val: Wrapping<u8>, old_val: u8) {
-        if new_val.0 < old_val {
+    // add rhs to lhs
+    // if lhs + rhs > u8::max then set VF to 1 else set VF to 0
+    fn add_with_carry(&mut self, lhs: Wrapping<u8>, rhs: Wrapping<u8>) -> Wrapping<u8> {
+        let max = Wrapping(u8::MAX);
+        self.set_carry((max - lhs) < rhs);
+        lhs + rhs
+    }
+
+    // subtract rhs from lhs.
+    // if lhs < rhs then set VF to 1 else set VF to 0
+    fn subtract_with_borrow(&mut self, lhs: Wrapping<u8>, rhs: Wrapping<u8>) -> Wrapping<u8> {
+        self.set_carry(lhs >= rhs);
+        lhs - rhs
+    }
+
+    // if val == true set VF=1 else VF=0
+    fn set_carry(&mut self, val: bool) {
+        if val {
             self.registers[0xF] = Wrapping(1);
         } else {
             self.registers[0xF] = Wrapping(0);
@@ -524,21 +540,15 @@ impl<'a> Interpreter<'a> {
     // Set VX to VX plus VY
     // Op code: 8XY4
     fn math_vx_pleq_vy(&mut self, vxindex: usize, vyindex: usize) {
-        let tmp = self.registers[vxindex].0;
-
-        self.registers[vxindex] += self.registers[vyindex];
-
-        self.do_carry(self.registers[vxindex], tmp);
+        self.registers[vxindex] =
+            self.add_with_carry(self.registers[vxindex], self.registers[vyindex]);
     }
 
     // Set VX to VX minus VY
     // Op code: 8XY5
     fn math_vx_mieq_vy(&mut self, vxindex: usize, vyindex: usize) {
-        let tmp = self.registers[vxindex].0;
-
-        self.registers[vxindex] -= self.registers[vyindex];
-
-        self.do_carry(self.registers[vxindex], tmp);
+        self.registers[vxindex] =
+            self.subtract_with_borrow(self.registers[vxindex], self.registers[vyindex]);
     }
 
     // Store least significant bit of VX in VF then right shift VX
@@ -551,9 +561,8 @@ impl<'a> Interpreter<'a> {
     // Set VX to VY minus VX
     // Op code: 8XY7
     fn math_vx_eq_vy_mi_vx(&mut self, vxindex: usize, vyindex: usize) {
-        let vx = self.registers[vxindex];
-        self.registers[vxindex] = self.registers[vyindex] - vx;
-        self.do_carry(self.registers[vxindex], vx.0);
+        self.registers[vxindex] =
+            self.subtract_with_borrow(self.registers[vyindex], self.registers[vxindex]);
     }
 
     // Store most significant bit of VX in VF then left shift VX
