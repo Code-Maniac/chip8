@@ -25,8 +25,8 @@ struct Args {
     pixelsize: usize,
 
     // the clock speed on the "cpu" in MHz
-    #[clap(short, long, default_value = "1.0")]
-    clockspeed: f32,
+    #[clap(short, long, default_value = "1000")]
+    clockspeed: u32,
 }
 
 pub fn start() {

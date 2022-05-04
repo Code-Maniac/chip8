@@ -15,6 +15,7 @@ pub struct VideoDevice {
     canvas: WindowCanvas,
     pixelmap: [u8; DISPLAY_SIZE],
     pixelsize: usize,
+    dirty: bool,
 }
 
 impl VideoDevice {
@@ -38,29 +39,31 @@ impl VideoDevice {
             canvas,
             pixelmap: [0; DISPLAY_SIZE],
             pixelsize,
+            dirty: true,
         }
     }
 
     pub fn render(&mut self) {
-        for i in 0..DISPLAY_SIZE {
-            let x = i % DISPLAY_WIDTH;
-            let y = i / DISPLAY_WIDTH;
-            let pixel = self.get_pixel(x as u8, y as u8);
+        if self.dirty {
+            let mut rect = Rect::new(0, 0, self.pixelsize as u32, self.pixelsize as u32);
+            for i in 0..DISPLAY_SIZE {
+                let x = i % DISPLAY_WIDTH;
+                let y = i / DISPLAY_WIDTH;
 
-            if pixel == 0x0 {
-                self.canvas.set_draw_color(BLACK);
-            } else {
-                self.canvas.set_draw_color(WHITE);
+                rect.set_x((x * self.pixelsize) as i32);
+                rect.set_y((y * self.pixelsize) as i32);
+
+                let pixel = self.get_pixel(x as u8, y as u8);
+
+                if pixel == 0x0 {
+                    self.canvas.set_draw_color(BLACK);
+                } else {
+                    self.canvas.set_draw_color(WHITE);
+                }
+                self.canvas.fill_rect(rect).unwrap();
             }
-            let rect = Rect::new(
-                x as i32 * self.pixelsize as i32,
-                y as i32 * self.pixelsize as i32,
-                self.pixelsize as u32,
-                self.pixelsize as u32,
-            );
-            self.canvas.fill_rect(rect).unwrap();
+            self.present();
         }
-        self.canvas.present();
     }
 
     pub fn clear(&mut self) {
@@ -68,6 +71,7 @@ impl VideoDevice {
         for i in 0..DISPLAY_SIZE {
             self.pixelmap[i] = 0;
         }
+        self.dirty = true;
     }
 
     pub fn get_pixel_byte_addr(&self, x: u8, y: u8) -> usize {
@@ -84,6 +88,8 @@ impl VideoDevice {
 
         let pixel_byte_addr = self.get_pixel_byte_addr(x, y);
         self.pixelmap[pixel_byte_addr] ^= val;
+
+        self.dirty = true;
     }
 
     pub fn get_width(&self) -> usize {
@@ -92,5 +98,10 @@ impl VideoDevice {
 
     pub fn get_height(&self) -> usize {
         DISPLAY_HEIGHT
+    }
+
+    fn present(&mut self) {
+        self.canvas.present();
+        self.dirty = false;
     }
 }

@@ -16,7 +16,6 @@ const MEM_SIZE: usize = 0x1000;
 
 // 16 registers
 const REGISTERS_SIZE: usize = 0x10;
-const TICK_INCREMENTS: [u32; 3] = [16, 17, 17];
 
 const PROGRAM_START: usize = 0x200;
 
@@ -61,9 +60,8 @@ pub struct Interpreter<'a> {
     // the keyboard device used to handle key input
     keyboard_device: KeyboardDevice<'a>,
 
-    //     // the keyboard device used for checking key pressed
-    //     keyboard_device: KeyboardDevice,
-    clockspeed: f32,
+    // the clockspeed in Hz
+    clockspeed: u32,
 
     // the memory
     memory: [u8; MEM_SIZE],
@@ -89,18 +87,13 @@ pub struct Interpreter<'a> {
     sound_timer: u8,
 
     // Time of the next opcode
-    next_opcode_time: Wrapping<u32>,
+    next_opcode_time: Wrapping<u128>,
 
     // the update time controls when the render and the timer decrement happens
     // this happens at a rate of 60hz
-    next_update_time: Wrapping<u32>,
+    next_update_time: Wrapping<u128>,
 
-    // the index of the ticks to use for the next update
-    // as time is in ms we need to inc by 16 16 17... to achieve 16.67ms
-    tick_increment_index: usize,
-
-    // counter +1 for every time update is called
-    update_counter: usize,
+    counter: u128,
 }
 
 impl<'a> Interpreter<'a> {
@@ -108,7 +101,7 @@ impl<'a> Interpreter<'a> {
         sdl_context: &'a Sdl,
         romfile: &Path,
         pixelsize: usize,
-        clockspeed: f32,
+        clockspeed: u32,
         start_time: &Instant,
     ) -> Result<Interpreter<'a>, &'static str> {
         let video_device = VideoDevice::new(&sdl_context, pixelsize);
@@ -129,10 +122,9 @@ impl<'a> Interpreter<'a> {
             i: 0,
             delay_timer: 0,
             sound_timer: 0,
-            next_opcode_time: Wrapping(start_time.elapsed().as_millis() as u32),
-            next_update_time: Wrapping(start_time.elapsed().as_millis() as u32),
-            tick_increment_index: 0,
-            update_counter: 0,
+            next_opcode_time: Wrapping(start_time.elapsed().as_micros()),
+            next_update_time: Wrapping(start_time.elapsed().as_micros()),
+            counter: 0,
         };
 
         // load the romfile into the program data in the interpretter memory
@@ -151,23 +143,30 @@ impl<'a> Interpreter<'a> {
 
     // function to do next cpu cycle
     pub fn update(&mut self, start_time: &Instant) {
-        self.check_exit();
-        self.keyboard_device.read_keys();
-
         let elapsed = start_time.elapsed();
-        let ticks = elapsed.as_millis() as u32;
+        let ticks = Wrapping(elapsed.as_micros());
 
-        // NOTE: the way this updates is only for the timers.
-        // NOTE: change the opcode processing to work based on the clock speed
-        // NOTE: change the
-        if ticks >= self.next_opcode_time.0 {
+        let mut action_happened = false;
+
+        // handle opcode timer
+        if ticks >= self.next_opcode_time {
+            self.keyboard_device.read_keys();
+
             self.process_opcode();
-            self.update_counter += 1;
 
-            self.next_opcode_time += Wrapping(8);
+            let tick_time = 1000000.0 / (self.clockspeed as f64);
+            self.next_opcode_time = ticks + Wrapping(tick_time as u128);
+
+            action_happened = true;
+
+            self.counter += 1;
         }
 
-        if ticks >= self.next_update_time.0 {
+        // handle update timer
+        if ticks >= self.next_update_time {
+            // check events
+            self.check_exit();
+
             // as we are working in milliseconds and our update time is 16.6666667 we increment 16 once and increment 17 twice
             self.dec_delay_timer();
             self.dec_sound_timer();
@@ -178,10 +177,31 @@ impl<'a> Interpreter<'a> {
             // set the beep
             self.audio_device.set_beep(self.sound_timer > 0);
 
-            let inc = TICK_INCREMENTS[self.tick_increment_index];
-            self.next_update_time += Wrapping(inc);
-            self.tick_increment_index = self.tick_increment_index % TICK_INCREMENTS.len();
+            self.next_update_time = ticks + Wrapping(16667);
+
+            action_happened = true;
         }
+
+        if action_happened {
+            self.do_sleep(ticks);
+        }
+    }
+
+    // calculate the time till the next action, be it opcode processing or
+    // update.
+    // sleep until then
+    fn do_sleep(&self, ticks: Wrapping<u128>) {
+        let mut sleep_time: Wrapping<u128>;
+        if self.next_opcode_time < self.next_update_time {
+            sleep_time = self.next_opcode_time - ticks;
+        } else {
+            sleep_time = self.next_update_time - ticks;
+        }
+
+        // take 10% off
+        sleep_time = Wrapping(((sleep_time.0 as f64) * 0.9) as u128);
+
+        std::thread::sleep(std::time::Duration::from_micros(sleep_time.0 as u64));
     }
 
     fn check_exit(&self) {
