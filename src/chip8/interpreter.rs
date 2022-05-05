@@ -47,6 +47,9 @@ const FONT_DATA: &'static [u8; FONT_CHAR_SIZE * FONT_CHAR_COUNT] = &[
     0xF0, 0x80, 0xF0, 0x80, 0x80, // "F"
 ];
 
+// the number of ticks between updates
+const UPDATE_TICKS: u128 = 16667;
+
 pub struct Interpreter<'a> {
     // the sdl context
     sdl_context: &'a Sdl,
@@ -60,8 +63,8 @@ pub struct Interpreter<'a> {
     // the keyboard device used to handle key input
     keyboard_device: KeyboardDevice<'a>,
 
-    // the clockspeed in Hz
-    clockspeed: u32,
+    // the number of ticks between opcodes
+    opcode_ticks: u128,
 
     // the memory
     memory: [u8; MEM_SIZE],
@@ -111,7 +114,7 @@ impl<'a> Interpreter<'a> {
             video_device,
             audio_device,
             keyboard_device,
-            clockspeed,
+            opcode_ticks: (1000000.0 / (clockspeed as f64)) as u128,
             memory: [0; MEM_SIZE],
             registers: [Wrapping(0); REGISTERS_SIZE],
             stack: Vec::new(),
@@ -167,8 +170,7 @@ impl<'a> Interpreter<'a> {
 
         self.process_opcode();
 
-        let tick_time = 1000000.0 / (self.clockspeed as f64);
-        self.next_opcode_time = ticks + Wrapping(tick_time as u128);
+        self.next_opcode_time = ticks + Wrapping(self.opcode_ticks);
     }
 
     fn handle_update(&mut self, ticks: Wrapping<u128>) {
@@ -185,7 +187,7 @@ impl<'a> Interpreter<'a> {
         // set the beep
         self.audio_device.set_beep(self.sound_timer > 0);
 
-        self.next_update_time = ticks + Wrapping(16667);
+        self.next_update_time = ticks + Wrapping(UPDATE_TICKS);
     }
 
     // calculate the time till the next action, be it opcode processing or
