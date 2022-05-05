@@ -19,13 +19,14 @@ use interpreter::Interpreter;
 struct Args {
     romfile: String,
 
-    // the number of pixels that each "chip8" pixel is represented by on the
-    // window canvas
+    /// The number of pixels that each "chip8" pixel is represented by on the
+    /// window canvas
     #[clap(short, long, default_value_t = 8)]
     pixelsize: usize,
 
-    // the clock speed on the "cpu" in MHz
-    #[clap(short, long, default_value = "1000")]
+    /// The clock speed on the "cpu" in MHz, this is the number of chip8 opcodes
+    /// that will be processed per second
+    #[clap(short, long, default_value = "400")]
     clockspeed: u32,
 }
 
