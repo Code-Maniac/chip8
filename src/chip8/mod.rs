@@ -30,8 +30,6 @@ struct Args {
 }
 
 pub fn start() {
-    println!("Hello World!");
-
     // parse the arguments
     let args = Args::parse();
 

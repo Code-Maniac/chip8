@@ -92,8 +92,6 @@ pub struct Interpreter<'a> {
     // the update time controls when the render and the timer decrement happens
     // this happens at a rate of 60hz
     next_update_time: Wrapping<u128>,
-
-    counter: u128,
 }
 
 impl<'a> Interpreter<'a> {
@@ -124,7 +122,6 @@ impl<'a> Interpreter<'a> {
             sound_timer: 0,
             next_opcode_time: Wrapping(start_time.elapsed().as_micros()),
             next_update_time: Wrapping(start_time.elapsed().as_micros()),
-            counter: 0,
         };
 
         // load the romfile into the program data in the interpretter memory
@@ -150,41 +147,45 @@ impl<'a> Interpreter<'a> {
 
         // handle opcode timer
         if ticks >= self.next_opcode_time {
-            self.keyboard_device.read_keys();
-
-            self.process_opcode();
-
-            let tick_time = 1000000.0 / (self.clockspeed as f64);
-            self.next_opcode_time = ticks + Wrapping(tick_time as u128);
-
+            self.handle_opcode(ticks);
             action_happened = true;
-
-            self.counter += 1;
         }
 
         // handle update timer
         if ticks >= self.next_update_time {
-            // check events
-            self.check_exit();
-
-            // as we are working in milliseconds and our update time is 16.6666667 we increment 16 once and increment 17 twice
-            self.dec_delay_timer();
-            self.dec_sound_timer();
-
-            // draw to screen
-            self.video_device.render();
-
-            // set the beep
-            self.audio_device.set_beep(self.sound_timer > 0);
-
-            self.next_update_time = ticks + Wrapping(16667);
-
+            self.handle_update(ticks);
             action_happened = true;
         }
 
         if action_happened {
             self.do_sleep(ticks);
         }
+    }
+
+    fn handle_opcode(&mut self, ticks: Wrapping<u128>) {
+        self.keyboard_device.read_keys();
+
+        self.process_opcode();
+
+        let tick_time = 1000000.0 / (self.clockspeed as f64);
+        self.next_opcode_time = ticks + Wrapping(tick_time as u128);
+    }
+
+    fn handle_update(&mut self, ticks: Wrapping<u128>) {
+        // check events
+        self.check_exit();
+
+        // as we are working in milliseconds and our update time is 16.6666667 we increment 16 once and increment 17 twice
+        self.dec_delay_timer();
+        self.dec_sound_timer();
+
+        // draw to screen
+        self.video_device.render();
+
+        // set the beep
+        self.audio_device.set_beep(self.sound_timer > 0);
+
+        self.next_update_time = ticks + Wrapping(16667);
     }
 
     // calculate the time till the next action, be it opcode processing or
@@ -385,6 +386,12 @@ impl<'a> Interpreter<'a> {
     // moving the program counter along by 2
     fn inc_pc(&mut self) {
         self.pc = self.pc + 2;
+    }
+
+    // go to the previous instruction - as instruction are 2 bytes long that
+    // means moving theh program counter back by 2
+    fn dec_pc(&mut self) {
+        self.pc = self.pc - 2;
     }
 
     fn cond_inc_pc(&mut self, val: bool) {
@@ -624,14 +631,19 @@ impl<'a> Interpreter<'a> {
     fn display_draw(&mut self, vxindex: usize, vyindex: usize, height: u8) {
         let vx = self.registers[vxindex].0;
         let vy = self.registers[vyindex].0;
+        let mut carry = false;
         for i in 0..height as usize {
             let row_index = vy as usize + i;
             if row_index < self.video_device.get_height() {
-                self.xor_display_row(vx, row_index as u8, self.memory[self.i + i]);
+                if self.xor_display_row(vx, row_index as u8, self.memory[self.i + i]) {
+                    carry = true;
+                }
             } else {
                 break;
             }
         }
+
+        self.set_carry(carry);
     }
 
     // Skip the next instruction if key at VX is pressed
@@ -669,7 +681,15 @@ impl<'a> Interpreter<'a> {
     // Set VX to next key press - blocking operation until key is pressed
     // Op code: FX0A
     fn keyop_vx_set_key(&mut self, vxindex: usize) {
-        self.registers[vxindex] = Wrapping(self.keyboard_device.get_key_event());
+        match self.keyboard_device.get_key_press() {
+            Some(key) => {
+                self.registers[vxindex] = Wrapping(key);
+                self.keyboard_device.clear_keys();
+            }
+            None => {
+                self.dec_pc();
+            }
+        }
     }
 
     // Set the delay timer to VX
